@@ -291,19 +291,22 @@ export const AssistantEngine: React.FC = () => {
     const handleMouseEnter = () => electronAPI?.setInteractive?.(true);
     const handleMouseLeave = () => electronAPI?.setInteractive?.(false);
 
+    // Detect mobile for background styling
+    const isMobile = typeof navigator !== "undefined" && /iPhone|iPad|iPod|Android|Mobile/i.test(navigator.userAgent);
+
     return (
         <div
             style={{
                 position: "fixed",
                 inset: 0,
-                background: "transparent",
+                background: isMobile ? "#0a0c10" : "transparent",
                 fontFamily: "'Outfit', sans-serif",
                 overflow: "hidden",
-                pointerEvents: "none", // entire overlay is click-through by default
+                pointerEvents: isMobile ? "auto" : "none", // entire overlay is click-through by default on desktop
             }}
         >
             {/* ── GREEN SCREEN BORDER (like macOS recording) ────────── */}
-            {initialized && camStatus === "on" && (
+            {initialized && camStatus === "on" && !isMobile && (
                 <>
                     <div style={{
                         position: "fixed", top: 0, left: 0, right: 0, height: 3,

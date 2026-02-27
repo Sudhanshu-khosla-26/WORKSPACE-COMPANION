@@ -71,7 +71,15 @@ export class VoiceSystem {
 
         this.setupMeter(this.micStream);
 
-        // 2. Try Web Speech API
+        // 2. Try Web Speech API (Only Chrome desktop/Android)
+        // Safari mobile is too restrictive/unreliable with continuous speech
+        // Firefox often lacks the backend service for it
+        if (this.isSafari || /Firefox/i.test(navigator.userAgent)) {
+            console.log(`[Voice] skipping Web Speech API for ${this.isSafari ? "Safari" : "Firefox"} → using reliable fallback`);
+            this.startRecorderFallback();
+            return "recorder";
+        }
+
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const SR = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
         if (SR) {
