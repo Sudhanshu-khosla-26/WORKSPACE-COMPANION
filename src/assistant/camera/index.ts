@@ -114,7 +114,8 @@ export class CameraCapture {
             const ctrl = new AbortController();
             const tid = setTimeout(() => ctrl.abort(), 3000);
 
-            const res = await fetch("http://localhost:8000/analyze-face", {
+            const baseUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+            const res = await fetch(`${baseUrl}/analyze-face`, {
                 method: "POST",
                 body: form,
                 signal: ctrl.signal,

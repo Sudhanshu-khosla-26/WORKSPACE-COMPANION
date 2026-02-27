@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "main": "electron/main.js",
   "private": true,
+  "author": "Sudhanshu Khosla",
   "scripts": {
     "dev": "concurrently \"next dev\" \"wait-on http://localhost:3000 && electron .\"",
     "build": "next build",

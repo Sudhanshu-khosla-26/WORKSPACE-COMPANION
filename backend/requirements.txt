@@ -1,9 +1,12 @@
 fastapi
 uvicorn[standard]
-opencv-python
+opencv-python-headless
 numpy
 structlog
 python-multipart
 pydantic
+deepface
 pandas
+tf-keras
+tensorflow-cpu
 mediapipe

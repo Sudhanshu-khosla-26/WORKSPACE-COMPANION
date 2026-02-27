@@ -57,7 +57,8 @@ export class ScreenCapture {
         try {
             const formData = new FormData();
             formData.append("file", blob, "screen.jpg");
-            const res = await fetch("http://localhost:8000/analyze-screen", {
+            const baseUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+            const res = await fetch(`${baseUrl}/analyze-screen`, {
                 method: "POST",
                 body: formData,
             });

@@ -6,18 +6,15 @@ This guide explains how to deploy the Buddy AI Companion, focusing on the Python
 
 ## 1. Backend Deployment (FastAPI)
 
-### Option A: Cloud Hosting (Recommended for remote access)
-You can host the backend on services like **Railway**, **Render**, or **DigitalOcean**.
+### Option A: Cloud Hosting (Render / Railway)
+You are using **Render** for your backend: `https://workspace-companion.onrender.com`.
 
-1. **Requirements**: Ensure your `requirements.txt` is up to date.
-2. **Platform Setup**:
-   - Create a new Web Service and link your GitHub repository.
-   - **Build Command**: `pip install -r requirements.txt`
-   - **Start Command**: `python -m uvicorn server:app --host 0.0.0.0 --port $PORT`
-3. **Environment Variables**: Add any necessary keys (though the backend currently handles local analysis).
+1. **Build Command**: `pip install -r requirements.txt`
+2. **Start Command**: `python -m uvicorn server:app --host 0.0.0.0 --port 10000`
+3. **Important**: Since Render is a headless Linux environment, we use `opencv-python-headless` in `requirements.txt` to avoid missing library errors.
 
-> [!IMPORTANT]
-> Since the backend uses MediaPipe/OpenCV, the cloud environment must support these libraries (usually via standard Ubuntu/Debian buildpacks).
+> [!TIP]
+> If you see "libGL.so.1" errors on Render, ensure you are using the `headless` version of OpenCV.
 
 ### Option B: Local Executable (For sharing as a standalone app)
 You can turn the Python backend into an `.exe` so others don't need Python installed.
