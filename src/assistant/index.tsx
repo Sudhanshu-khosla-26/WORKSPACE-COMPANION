@@ -16,9 +16,9 @@ export interface UserState {
     lastEmotion: string;
 }
 
-const PROACTIVE_COOLDOWN = 60_000; // 1 min between proactive nudges (more active)
-const TIRED_THRESHOLD = 0.45; // More sensitive
-const DISTRACT_THRESHOLD = 45; // More sensitive
+const PROACTIVE_COOLDOWN = 60_000; // 1 min between proactive nudges
+const TIRED_THRESHOLD = 0.45;
+const DISTRACT_THRESHOLD = 45;
 const NEG_EMOTIONS = ["sad", "angry", "fear", "disgust"];
 const GREET_TRIGGER = "<greet and introduce yourself naturally>";
 
@@ -27,14 +27,14 @@ export const AssistantEngine: React.FC = () => {
     const [awake, setAwake] = useState(false);
     const [isListening, setIsListening] = useState(false);
     const [isSpeaking, setIsSpeaking] = useState(false);
-    const [audioLevel, setAudioLevel] = useState(0);
-    const [transcript, setTranscript] = useState<string | null>(null);
     const [ariaReply, setAriaReply] = useState<string | null>(null);
     const [screenActivity, setScreenActivity] = useState("unknown");
     const [frameCount, setFrameCount] = useState(0);
     const [camStatus, setCamStatus] = useState<"off" | "starting" | "on" | "error">("off");
     const [voiceStatus, setVoiceStatus] = useState<"off" | "on" | "error">("off");
     const [liveStatus, setLiveStatus] = useState<"connecting" | "ready" | "error">("connecting");
+    const [audioLevel, setAudioLevel] = useState(0);
+    const [transcript, setTranscript] = useState<string | null>(null);
     const [lastUpdate, setLastUpdate] = useState(0);
 
     // Stats live here as a ref so camera callback always has fresh values
@@ -154,12 +154,6 @@ export const AssistantEngine: React.FC = () => {
         sendToBuddy(text, stateRef.current, true);
     }, [sendToBuddy]);
 
-    /* ── Wake word ────────────────────────────────────────── */
-    const handleWakeWord = useCallback(() => {
-        console.log("[Engine] wake word heard");
-        setAwake(true);
-    }, []);
-
     /* ── Proactive check (uses ref for stability) ─────────── */
     const proactiveCheckRef = useRef<(s: UserState) => void>(() => { });
     proactiveCheckRef.current = (newState: UserState) => {
@@ -204,43 +198,54 @@ export const AssistantEngine: React.FC = () => {
         try { (window as any).electronAPI?.saveFrame?.(dataUrl); } catch { /* not Electron */ }
     }, []);
 
+    const [statusMsg, setStatusMsg] = useState("Waking up Buddy...");
+
+    const initializingRef = useRef(false);
+
     /* ── Initialize ──────────────────────────────────────── */
     const initialize = useCallback(async () => {
-        if (initialized) return;
-        setInitialized(true);
+        if (initialized || initializingRef.current) return;
+        initializingRef.current = true;
+
+        const geminiKey = process.env.NEXT_PUBLIC_GEMINI_KEY;
+        console.log("[Engine] Checking keys...", geminiKey ? "Found" : "Missing");
 
         // Connect to Gemini Live first
+        setStatusMsg("Connecting to Gemini Live...");
         setLiveStatus("connecting");
         try {
             const buddy = getBuddy();
+            if (!geminiKey) {
+                throw new Error("NEXT_PUBLIC_GEMINI_KEY is missing from build!");
+            }
             await buddy.connect();
             setLiveStatus("ready");
             console.log("[Engine] Gemini Live connected ✓");
         } catch (e) {
             console.error("[Engine] Gemini Live failed:", e);
             setLiveStatus("error");
+            setStatusMsg(`Gemini Connection Failed: ${(e as Error).message}`);
+            // Don't return, try to start other systems anyway
         }
 
         // Voice (STT only — audio output from Gemini native)
+        setStatusMsg("Starting voice system...");
         try {
             voiceRef.current = new VoiceSystem(
                 handleSpeech,
                 () => { /* speaking handled by BuddyLive */ },
-                () => { /* mic level only needed if buddy not speaking */ },
-                handleWakeWord,
-                (isAwake) => setAwake(isAwake) // Sync UI state
+                () => { /* mic level — not needed when buddy speaks */ },
             );
             voiceRef.current.startListening();
             setIsListening(true);
+            setAwake(true);
             setVoiceStatus("on");
-            console.log("[Engine] voice STT started");
+            console.log("[Engine] voice STT started — always listening ✓");
 
-            // Automatic Greet
+            // Automatic Greet after short delay
             setTimeout(() => {
-                // Force awake so Buddy can greet and the user can reply immediately
-                voiceRef.current?.forceAwake();
                 sendToBuddy(GREET_TRIGGER, stateRef.current, false);
-            }, 2000);
+            }, 2500);
 
         } catch (e) {
             console.error("[Engine] voice failed:", e);
@@ -248,6 +253,7 @@ export const AssistantEngine: React.FC = () => {
         }
 
         // Camera
+        setStatusMsg("Starting camera vision...");
         setCamStatus("starting");
         try {
             const previewEl = document.getElementById("camera-preview-video") as HTMLVideoElement;
@@ -261,11 +267,15 @@ export const AssistantEngine: React.FC = () => {
         }
 
         // Screen (non-blocking)
+        setStatusMsg("Starting screen analysis...");
         try {
             screenRef.current = new ScreenCapture(handleScreenResult);
             screenRef.current.start().catch(() => { });
         } catch { /* optional */ }
-    }, [initialized, getBuddy, handleSpeech, handleWakeWord, handleFaceResult, handleFrame, handleScreenResult]);
+
+        setInitialized(true);
+        initializingRef.current = false;
+    }, [initialized, getBuddy, handleSpeech, handleFaceResult, handleFrame, handleScreenResult]);
 
     /* ── Emotion → color ──────────────────────────────────── */
     const emotionColor: Record<string, string> = {
@@ -278,8 +288,8 @@ export const AssistantEngine: React.FC = () => {
         <div
             className="min-h-screen flex flex-col"
             style={{
-                background: "radial-gradient(ellipse at 50% -10%, #0e1230 0%, #07080d 65%)",
-                fontFamily: "'Inter', sans-serif",
+                background: "radial-gradient(ellipse at 50% -10%, #0a0a12 0%, #000000 65%)",
+                fontFamily: "'Outfit', sans-serif",
             }}
         >
             {/* ── Top bar ──────────────────────────────────────── */}
@@ -308,7 +318,7 @@ export const AssistantEngine: React.FC = () => {
                         {/* Voice status */}
                         <StatusDot
                             status={voiceStatus === "on" ? "ok" : voiceStatus === "error" ? "err" : "off"}
-                            label={voiceStatus === "on" ? (awake ? "🎙 listening" : "say 'hey buddy'") : "mic off"}
+                            label={voiceStatus === "on" ? "🎙 always listening" : "mic off"}
                         />
                     </div>
                 )}
@@ -352,7 +362,7 @@ export const AssistantEngine: React.FC = () => {
                 )}
 
                 {/* AI reply bubble */}
-                {ariaReply && (
+                {/* {ariaReply && (
                     <div style={{
                         background: "rgba(129, 140, 248, 0.08)", border: "1px solid rgba(129, 140, 248, 0.15)",
                         borderRadius: "16px 16px 16px 0px", padding: "14px 22px", maxWidth: 400,
@@ -363,13 +373,13 @@ export const AssistantEngine: React.FC = () => {
                         <p style={{ fontSize: 8, color: "#818cf8", letterSpacing: "0.2em", marginBottom: 6, fontWeight: 700 }}>SOOTHING COMPANION · JEE FOCUS</p>
                         <p style={{ fontSize: 13, color: "#cbd5e1", lineHeight: 1.6, fontWeight: 400 }}>{ariaReply}</p>
                     </div>
-                )}
+                )} */}
 
                 {/* Welcome message when not yet fully ready */}
                 {!initialized && (
                     <div style={{ textAlign: "center", marginTop: 24 }}>
                         <p style={{ fontSize: 12, color: "#475569" }}>
-                            Waking up Buddy...
+                            {statusMsg}
                         </p>
                     </div>
                 )}

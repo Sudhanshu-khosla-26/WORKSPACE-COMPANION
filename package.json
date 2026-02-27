@@ -25,6 +25,11 @@
   "build": {
     "appId": "com.sudhanshu.app",
     "productName": "MyDesktopApp",
+    "files": [
+      "out/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
     "win": {
       "target": "nsis"
     }

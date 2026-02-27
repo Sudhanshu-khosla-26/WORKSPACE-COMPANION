@@ -5,6 +5,7 @@ export interface FaceAnalysisResult {
     blink_rate: number;
     emotion?: string;
     emotion_confidence?: number;
+    body_action?: string; // normal, head_down, looking_up, head_tilt, stressed
 }
 
 export class CameraCapture {
@@ -125,7 +126,7 @@ export class CameraCapture {
             if (res.ok) {
                 const data: FaceAnalysisResult = await res.json();
                 if (this.framesSent % 5 === 0) { // log every second
-                    console.log(`[Camera] result → emotion:${data.emotion} fatigue:${data.fatigue_score?.toFixed(2)} dist:${data.distraction_score?.toFixed(1)}`);
+                    console.log(`[Camera] → emotion:${data.emotion} fatigue:${data.fatigue_score?.toFixed(2)} action:${data.body_action || 'n/a'}`);
                 }
                 this.onResult(data);
             }

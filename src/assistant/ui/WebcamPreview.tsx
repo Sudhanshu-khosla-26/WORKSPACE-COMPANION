@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useRef, useEffect } from "react";
+import React from "react";
 
 interface WebcamPreviewProps {
     stream: MediaStream | null;
@@ -9,25 +9,43 @@ interface WebcamPreviewProps {
 }
 
 export const WebcamPreview: React.FC<WebcamPreviewProps> = ({ active, emotion }) => {
-    const videoRef = useRef<HTMLVideoElement>(null);
-
     return (
         <div style={{
             position: "relative",
-            width: 180,
-            height: 135,
-            borderRadius: 16,
+            width: 140,
+            height: 105,
+            borderRadius: 12,
             overflow: "hidden",
-            border: "2px solid rgba(255,255,255,0.1)",
             background: "#000",
-            boxShadow: "0 10px 30px rgba(0,0,0,0.5)",
-            transition: "all 0.3s ease",
-            opacity: active ? 1 : 0.4,
+            transition: "all 0.4s ease",
+            opacity: active ? 1 : 0.3,
             filter: active ? "none" : "grayscale(1)",
+            // Green glow border when camera is ON (like macOS indicator)
+            border: active
+                ? "2px solid rgba(34, 197, 94, 0.8)"
+                : "2px solid rgba(255,255,255,0.08)",
+            boxShadow: active
+                ? "0 0 12px rgba(34, 197, 94, 0.4), 0 0 30px rgba(34, 197, 94, 0.15), 0 8px 24px rgba(0,0,0,0.4)"
+                : "0 8px 24px rgba(0,0,0,0.4)",
         }}>
+            {/* Green indicator dot (like macOS) */}
+            {active && (
+                <div style={{
+                    position: "absolute",
+                    top: 8,
+                    right: 8,
+                    width: 8,
+                    height: 8,
+                    borderRadius: "50%",
+                    background: "#22c55e",
+                    boxShadow: "0 0 6px #22c55e, 0 0 12px rgba(34, 197, 94, 0.5)",
+                    animation: "greenPulse 2s ease-in-out infinite",
+                    zIndex: 10,
+                }} />
+            )}
+
             {/* The Video Feed */}
             <video
-                ref={videoRef}
                 id="camera-preview-video"
                 autoPlay
                 muted
@@ -36,43 +54,68 @@ export const WebcamPreview: React.FC<WebcamPreviewProps> = ({ active, emotion })
                     width: "100%",
                     height: "100%",
                     objectFit: "cover",
-                    transform: "scaleX(-1)", // Mirror
+                    transform: "scaleX(-1)",
                 }}
             />
 
-            {/* Scanning Overlay Overlay */}
-            <div style={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                right: 0,
-                bottom: 0,
-                pointerEvents: "none",
-                background: "linear-gradient(to bottom, transparent 95%, rgba(34, 211, 238, 0.2) 100%)",
-                backgroundSize: "100% 40px",
-                animation: "scan 3s linear infinite",
-            }} />
+            {/* Scanning Overlay */}
+            {active && (
+                <div style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    pointerEvents: "none",
+                    background: "linear-gradient(to bottom, transparent 90%, rgba(34, 197, 94, 0.15) 100%)",
+                    backgroundSize: "100% 30px",
+                    animation: "scan 4s linear infinite",
+                }} />
+            )}
 
-            {/* Corner Accents */}
-            <div style={{ position: "absolute", top: 10, left: 10, width: 8, height: 8, borderTop: "2px solid #22d3ee", borderLeft: "2px solid #22d3ee" }} />
-            <div style={{ position: "absolute", top: 10, right: 10, width: 8, height: 8, borderTop: "2px solid #22d3ee", borderRight: "2px solid #22d3ee" }} />
+            {/* Corner Accents (green when active) */}
+            <div style={{
+                position: "absolute", top: 6, left: 6, width: 10, height: 10,
+                borderTop: `2px solid ${active ? "rgba(34, 197, 94, 0.7)" : "rgba(255,255,255,0.1)"}`,
+                borderLeft: `2px solid ${active ? "rgba(34, 197, 94, 0.7)" : "rgba(255,255,255,0.1)"}`,
+                transition: "border-color 0.3s ease",
+            }} />
+            <div style={{
+                position: "absolute", top: 6, right: 6, width: 10, height: 10,
+                borderTop: `2px solid ${active ? "rgba(34, 197, 94, 0.7)" : "rgba(255,255,255,0.1)"}`,
+                borderRight: `2px solid ${active ? "rgba(34, 197, 94, 0.7)" : "rgba(255,255,255,0.1)"}`,
+                transition: "border-color 0.3s ease",
+            }} />
+            <div style={{
+                position: "absolute", bottom: 6, left: 6, width: 10, height: 10,
+                borderBottom: `2px solid ${active ? "rgba(34, 197, 94, 0.7)" : "rgba(255,255,255,0.1)"}`,
+                borderLeft: `2px solid ${active ? "rgba(34, 197, 94, 0.7)" : "rgba(255,255,255,0.1)"}`,
+                transition: "border-color 0.3s ease",
+            }} />
+            <div style={{
+                position: "absolute", bottom: 6, right: 6, width: 10, height: 10,
+                borderBottom: `2px solid ${active ? "rgba(34, 197, 94, 0.7)" : "rgba(255,255,255,0.1)"}`,
+                borderRight: `2px solid ${active ? "rgba(34, 197, 94, 0.7)" : "rgba(255,255,255,0.1)"}`,
+                transition: "border-color 0.3s ease",
+            }} />
 
             {/* Emotion Badge */}
             {active && emotion && (
                 <div style={{
                     position: "absolute",
-                    bottom: 8,
+                    bottom: 6,
                     left: "50%",
                     transform: "translateX(-50%)",
-                    background: "rgba(0,0,0,0.7)",
-                    backdropFilter: "blur(4px)",
-                    padding: "2px 8px",
-                    borderRadius: 4,
+                    background: "rgba(0,0,0,0.75)",
+                    backdropFilter: "blur(6px)",
+                    padding: "2px 10px",
+                    borderRadius: 6,
                     fontSize: 9,
-                    color: "#22d3ee",
-                    letterSpacing: "0.1em",
+                    color: "#22c55e",
+                    letterSpacing: "0.12em",
                     textTransform: "uppercase",
-                    border: "1px solid rgba(34, 211, 238, 0.3)",
+                    fontWeight: 600,
+                    border: "1px solid rgba(34, 197, 94, 0.25)",
                 }}>
                     {emotion}
                 </div>
@@ -82,6 +125,10 @@ export const WebcamPreview: React.FC<WebcamPreviewProps> = ({ active, emotion })
                 @keyframes scan {
                     from { transform: translateY(-100%); }
                     to { transform: translateY(100%); }
+                }
+                @keyframes greenPulse {
+                    0%, 100% { opacity: 1; box-shadow: 0 0 6px #22c55e, 0 0 12px rgba(34, 197, 94, 0.5); }
+                    50% { opacity: 0.7; box-shadow: 0 0 3px #22c55e, 0 0 8px rgba(34, 197, 94, 0.3); }
                 }
             `}</style>
         </div>
