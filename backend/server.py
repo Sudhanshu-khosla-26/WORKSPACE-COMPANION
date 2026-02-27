@@ -1,12 +1,17 @@
+"""
+Buddy Backend — Zero TensorFlow
+Emotion detection via MediaPipe face landmarks (mouth ratio, brow distance, EAR).
+Body action via head pose estimation.
+Screen analysis via OpenCV histogram/edge detection.
+"""
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 import cv2
 import numpy as np
 import asyncio
-import io
+import math
 
 app = FastAPI()
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,342 +20,284 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Try to load DeepFace for real emotion detection ──────────────────────────
-DEEPFACE_AVAILABLE = False
-try:
-    from deepface import DeepFace
-    DEEPFACE_AVAILABLE = True
-    print("[✓] DeepFace loaded — real emotion detection active")
-except Exception as e:
-    print(f"[✗] DeepFace not available: {e}")
-
-# ── Try MediaPipe for fatigue / gaze / body actions ──────────────────────────
-MEDIAPIPE_AVAILABLE = False
+# ── MediaPipe ────────────────────────────────────────────────────────────────
+MEDIAPIPE_OK = False
 FACE_MESH = None
-
 try:
     import mediapipe as mp
-    try:
-        import mediapipe.python.solutions.face_mesh as mp_face_mesh
-        FACE_MESH = mp_face_mesh.FaceMesh(
-            max_num_faces=1,
-            refine_landmarks=True,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
-        )
-        MEDIAPIPE_AVAILABLE = True
-        print("[✓] MediaPipe FaceMesh loaded")
-    except ImportError:
-        if hasattr(mp, "solutions"):
-            FACE_MESH = mp.solutions.face_mesh.FaceMesh(
-                max_num_faces=1,
-                refine_landmarks=True,
-                min_detection_confidence=0.5,
-                min_tracking_confidence=0.5,
-            )
-            MEDIAPIPE_AVAILABLE = True
-            print("[✓] MediaPipe FaceMesh loaded (standard path)")
+    FACE_MESH = mp.solutions.face_mesh.FaceMesh(
+        max_num_faces=1,
+        refine_landmarks=True,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5,
+    )
+    MEDIAPIPE_OK = True
+    print("[✓] MediaPipe loaded")
 except Exception as e:
-    print(f"[✗] MediaPipe not available: {e}")
+    print(f"[✗] MediaPipe: {e}")
 
-# ── State tracking for smoothing ─────────────────────────────────────────────
-import math
-
-last_known_emotion = "neutral"
-last_known_emotion_conf = 0.5
-consecutive_head_down = 0
-consecutive_eyes_low = 0
-
-# ── Haarcascade for face detection fallback ──────────────────────────────────
+# ── Haar cascade fallback for face detection ─────────────────────────────────
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
 
-
-def decode_image(data: bytes):
-    try:
-        arr = np.frombuffer(data, np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        return img
-    except Exception as e:
-        print(f"[WARN] decode_image: {e}")
-        return None
+# ── Smoothing state ──────────────────────────────────────────────────────────
+prev_emotion = "neutral"
+prev_conf = 0.5
+head_down_n = 0
+eyes_low_n = 0
 
 
-# ── Health check ─────────────────────────────────────────────────────────────
+def decode(data: bytes):
+    arr = np.frombuffer(data, np.uint8)
+    return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+
+
 @app.get("/health")
 async def health():
-    return {
-        "status": "ok",
-        "deepface": DEEPFACE_AVAILABLE,
-        "mediapipe": MEDIAPIPE_AVAILABLE,
-    }
+    return {"status": "ok", "mediapipe": MEDIAPIPE_OK}
 
 
-# ── Face Analysis ────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# FACE ANALYSIS
+# ═══════════════════════════════════════════════════════════════════════════════
 @app.post("/analyze-face")
 async def analyze_face(file: UploadFile = File(...)):
     raw = await file.read()
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, _analyze_face_sync, raw)
-    return result
+    return await asyncio.get_event_loop().run_in_executor(None, _face, raw)
 
 
-def _analyze_face_sync(raw: bytes) -> dict:
-    global last_known_emotion, last_known_emotion_conf
-    global consecutive_head_down, consecutive_eyes_low
+def _face(raw: bytes) -> dict:
+    global prev_emotion, prev_conf, head_down_n, eyes_low_n
 
-    img = decode_image(raw)
+    img = decode(raw)
     if img is None:
-        return {
-            "fatigue_score": 0.1,
-            "gaze_direction": "UNKNOWN",
-            "distraction_score": 5.0,
-            "blink_rate": 0.3,
-            "emotion": last_known_emotion,
-            "emotion_confidence": 0.3,
-            "body_action": "unknown",
-        }
+        return _default()
 
-    # Base values
-    emotion = last_known_emotion
-    emotion_conf = last_known_emotion_conf
-    fatigue = 0.1
+    emotion = prev_emotion
+    conf = prev_conf
+    fatigue = 0.05
     gaze = "CENTER"
     distraction = 5.0
-    blink_rate = 0.28
-    body_action = "normal"  # normal, head_down, looking_up, head_tilt, stressed
+    blink = 0.28
+    action = "normal"
 
-    # ── Emotion via DeepFace ─────────────────────────────────────────────────
-    if DEEPFACE_AVAILABLE:
-        try:
-            analysis = DeepFace.analyze(
-                img,
-                actions=["emotion"],
-                enforce_detection=False,
-                silent=True,
-            )
-            if isinstance(analysis, list):
-                analysis = analysis[0]
-            detected_emotion = analysis.get("dominant_emotion", "neutral").lower()
-            emotions_dict = analysis.get("emotion", {})
-            detected_conf = round(emotions_dict.get(detected_emotion, 50) / 100, 2)
+    if not MEDIAPIPE_OK or not FACE_MESH:
+        # Haar cascade fallback — just detect face presence
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+        if len(faces) == 0:
+            action = "no_face"
+            distraction = 60.0
+        return {
+            "fatigue_score": fatigue, "gaze_direction": gaze,
+            "distraction_score": distraction, "blink_rate": blink,
+            "emotion": emotion, "emotion_confidence": conf,
+            "body_action": action,
+        }
 
-            # Only update if confidence is decent
-            if detected_conf > 0.3:
-                emotion = detected_emotion
-                emotion_conf = detected_conf
-                last_known_emotion = emotion
-                last_known_emotion_conf = emotion_conf
-        except Exception as e:
-            # Keep last known emotion
-            pass
+    # ── MediaPipe analysis ───────────────────────────────────────────────────
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    mesh = FACE_MESH.process(rgb)
 
-    # ── Fatigue / Gaze / Body Actions via MediaPipe ──────────────────────────
-    if MEDIAPIPE_AVAILABLE and FACE_MESH:
-        try:
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            mesh = FACE_MESH.process(img_rgb)
+    if not mesh.multi_face_landmarks:
+        head_down_n += 1
+        if head_down_n > 5:
+            action = "no_face"
+            distraction = 50.0
+        return {
+            "fatigue_score": fatigue, "gaze_direction": "UNKNOWN",
+            "distraction_score": distraction, "blink_rate": blink,
+            "emotion": emotion, "emotion_confidence": conf,
+            "body_action": action,
+        }
 
-            if mesh.multi_face_landmarks:
-                lm = mesh.multi_face_landmarks[0].landmark
+    lm = mesh.multi_face_landmarks[0].landmark
 
-                # ── Eye Aspect Ratio (EAR) ───────────────────────────────────
-                def ear(indices):
-                    pts = np.array([[lm[i].x, lm[i].y] for i in indices])
-                    A = np.linalg.norm(pts[1] - pts[5])
-                    B = np.linalg.norm(pts[2] - pts[4])
-                    C = np.linalg.norm(pts[0] - pts[3])
-                    return (A + B) / (2.0 * C) if C > 0 else 0.25
+    # ── EAR (Eye Aspect Ratio) ───────────────────────────────────────────────
+    def ear(idx):
+        pts = np.array([[lm[i].x, lm[i].y] for i in idx])
+        A = np.linalg.norm(pts[1] - pts[5])
+        B = np.linalg.norm(pts[2] - pts[4])
+        C = np.linalg.norm(pts[0] - pts[3])
+        return (A + B) / (2.0 * C) if C > 0 else 0.25
 
-                left_ear = ear([33, 7, 163, 144, 145, 153])
-                right_ear = ear([362, 398, 384, 385, 387, 263])
-                avg_ear = (left_ear + right_ear) / 2.0
-                blink_rate = round(avg_ear, 3)
+    left_ear = ear([33, 7, 163, 144, 145, 153])
+    right_ear = ear([362, 398, 384, 385, 387, 263])
+    avg_ear = (left_ear + right_ear) / 2.0
+    blink = round(avg_ear, 3)
 
-                # ── Head Pitch (Looking Down / Up) ───────────────────────────
-                nose = lm[1]
-                forehead = lm[10]
-                chin = lm[152]
-                face_h = abs(chin.y - forehead.y)
-                nose_pos = (nose.y - forehead.y) / face_h if face_h > 0 else 0.5
+    # ── Head Pose ────────────────────────────────────────────────────────────
+    nose = lm[1]; forehead = lm[10]; chin = lm[152]
+    face_h = abs(chin.y - forehead.y)
+    nose_pos = (nose.y - forehead.y) / face_h if face_h > 0 else 0.5
 
-                # Looking down: nose_pos > 0.62
-                if nose_pos > 0.65:
-                    consecutive_head_down += 1
-                    body_action = "head_down"
-                else:
-                    consecutive_head_down = max(0, consecutive_head_down - 1)
+    if nose_pos > 0.65:
+        head_down_n += 1
+        action = "head_down"
+    else:
+        head_down_n = max(0, head_down_n - 1)
 
-                # Looking up: nose_pos < 0.42
-                if nose_pos < 0.40:
-                    body_action = "looking_up"
+    if nose_pos < 0.40:
+        action = "looking_up"
 
-                pitch_fatigue = max(0, min(1, (nose_pos - 0.55) / 0.2))
+    pitch_f = max(0, min(1, (nose_pos - 0.55) / 0.2))
+    ear_f = max(0, min(1, (0.26 - avg_ear) / 0.1))
 
-                # ── EAR Fatigue ──────────────────────────────────────────────
-                EAR_THRESH = 0.26
-                ear_fatigue = max(0, min(1, (EAR_THRESH - avg_ear) / 0.1))
+    if avg_ear < 0.22:
+        eyes_low_n += 1
+    else:
+        eyes_low_n = max(0, eyes_low_n - 1)
 
-                if avg_ear < 0.22:
-                    consecutive_eyes_low += 1
-                else:
-                    consecutive_eyes_low = max(0, consecutive_eyes_low - 1)
+    # Roll (head tilt)
+    le = lm[33]; re = lm[263]
+    roll = math.degrees(math.atan2(re.y - le.y, re.x - le.x))
+    roll_f = min(abs(roll) / 18.0, 1.0)
+    if abs(roll) > 15:
+        action = "head_tilt"
 
-                # ── Roll/Tilt (Head Tilt = possible stress/fatigue) ──────────
-                le = lm[33]
-                re = lm[263]
-                roll = math.degrees(math.atan2(re.y - le.y, re.x - le.x))
-                roll_fatigue = min(abs(roll) / 18.0, 1.0)
+    # Combined fatigue
+    fatigue = round(max(0.02, min(0.98,
+        0.35 * pitch_f + 0.35 * ear_f + 0.15 * roll_f + 0.15 * min(head_down_n / 5, 1)
+    )), 3)
 
-                if abs(roll) > 15:
-                    body_action = "head_tilt"
+    # Stressed detection
+    if fatigue > 0.5 and head_down_n > 3 and emotion in ("sad", "neutral", "fear"):
+        action = "stressed"
 
-                # ── Combined Fatigue Score ───────────────────────────────────
-                raw_fatigue = (
-                    0.35 * pitch_fatigue
-                    + 0.35 * ear_fatigue
-                    + 0.15 * roll_fatigue
-                    + 0.15 * min(consecutive_head_down / 5.0, 1.0)
-                )
-                fatigue = round(max(0.02, min(0.98, raw_fatigue)), 3)
+    # ── Gaze ─────────────────────────────────────────────────────────────────
+    nose_x = lm[1].x
+    eye_x = (le.x + re.x) / 2
+    gaze = "CENTER" if abs(eye_x - nose_x) < 0.03 else ("RIGHT" if eye_x > nose_x else "LEFT")
 
-                # ── Stressed Detection ───────────────────────────────────────
-                # If fatigue is high AND head is down repeatedly → stressed
-                if (
-                    fatigue > 0.5
-                    and consecutive_head_down > 3
-                    and emotion in ["sad", "neutral", "fear"]
-                ):
-                    body_action = "stressed"
+    # ── Distraction ──────────────────────────────────────────────────────────
+    raw_d = 0.0
+    if gaze != "CENTER": raw_d += 40
+    if pitch_f > 0.5: raw_d += 20
+    if abs(roll) > 12: raw_d += 15
+    if action == "head_down" and head_down_n > 3: raw_d += 10
+    distraction = round(max(2, min(95, raw_d)), 2)
 
-                # ── Emotion Fallback (if DeepFace failed) ────────────────────
-                if not DEEPFACE_AVAILABLE:
-                    mouth_w = abs(lm[291].x - lm[61].x)
-                    mouth_h = abs(lm[14].y - lm[13].y)
-                    m_ratio = mouth_h / mouth_w if mouth_w > 0 else 0
+    # ── Emotion from landmarks (no TensorFlow!) ──────────────────────────────
+    # Mouth measurements
+    mouth_w = abs(lm[291].x - lm[61].x)
+    mouth_h = abs(lm[14].y - lm[13].y)
+    lip_top = lm[13].y
+    lip_bot = lm[14].y
+    mouth_open = lip_bot - lip_top
+    m_ratio = mouth_h / mouth_w if mouth_w > 0 else 0.0
 
-                    brow_y = (lm[107].y + lm[336].y) / 2
-                    nose_bridge_y = lm[6].y
-                    brow_dist = nose_bridge_y - brow_y
+    # Inner lip distance (smile indicator)
+    left_lip = lm[61]
+    right_lip = lm[291]
+    upper_mid = lm[0]
+    lower_mid = lm[17]
+    lip_stretch = abs(right_lip.x - left_lip.x)
 
-                    if m_ratio > 0.25:
-                        emotion = "surprised"
-                        emotion_conf = 0.8
-                    elif m_ratio > 0.08 and mouth_w > 0.15:
-                        emotion = "happy"
-                        emotion_conf = 0.7
-                    elif avg_ear < 0.22 or pitch_fatigue > 0.6:
-                        emotion = "tired"
-                        emotion_conf = 0.85
-                    elif brow_dist < 0.02:
-                        emotion = "sad"
-                        emotion_conf = 0.6
-                    else:
-                        emotion = "neutral"
-                        emotion_conf = 0.9
+    # Brow measurements
+    left_brow = (lm[107].y + lm[66].y) / 2
+    right_brow = (lm[336].y + lm[296].y) / 2
+    avg_brow = (left_brow + right_brow) / 2
+    nose_bridge = lm[6].y
+    brow_raise = nose_bridge - avg_brow  # positive = brows raised
 
-                    last_known_emotion = emotion
-                    last_known_emotion_conf = emotion_conf
+    # Inner brow distance (furrowed = angry/sad)
+    inner_left_brow = lm[107].y
+    inner_right_brow = lm[336].y
+    brow_furrow = abs(inner_left_brow - inner_right_brow)
 
-                # ── Gaze ─────────────────────────────────────────────────────
-                nose_x = lm[1].x
-                eye_x = (le.x + re.x) / 2
-                if abs(eye_x - nose_x) < 0.03:
-                    gaze = "CENTER"
-                elif eye_x > nose_x:
-                    gaze = "RIGHT"
-                else:
-                    gaze = "LEFT"
+    # Classify emotion from geometry
+    new_emotion = "neutral"
+    new_conf = 0.85
 
-                # ── Distraction Score ────────────────────────────────────────
-                raw_distraction = 0.0
-                if gaze != "CENTER":
-                    raw_distraction += 40.0
-                if pitch_fatigue > 0.5:
-                    raw_distraction += 20.0
-                if abs(roll) > 12:
-                    raw_distraction += 15.0
-                if body_action == "head_down" and consecutive_head_down > 3:
-                    raw_distraction += 10.0
+    if m_ratio > 0.35 and brow_raise > 0.04:
+        # Wide open mouth + raised brows = surprised
+        new_emotion = "surprised"
+        new_conf = 0.9
+    elif m_ratio > 0.08 and lip_stretch > 0.14 and mouth_open > 0.005:
+        # Open mouth + wide lips = happy/smiling
+        new_emotion = "happy"
+        new_conf = 0.85
+    elif avg_ear < 0.20 and pitch_f > 0.5:
+        # Droopy eyes + head down = tired
+        new_emotion = "tired"
+        new_conf = 0.9
+    elif brow_raise < 0.015 and m_ratio < 0.04:
+        # Lowered brows + tight mouth = sad or angry
+        if avg_ear < 0.23:
+            new_emotion = "sad"
+            new_conf = 0.75
+        else:
+            new_emotion = "angry"
+            new_conf = 0.7
+    elif fatigue > 0.6:
+        new_emotion = "tired"
+        new_conf = 0.85
+    elif eyes_low_n > 4:
+        new_emotion = "tired"
+        new_conf = 0.8
+    else:
+        new_emotion = "neutral"
+        new_conf = 0.9
 
-                distraction = round(max(2.0, min(95.0, raw_distraction)), 2)
-
-        except Exception as e:
-            print(f"[WARN] MediaPipe analysis error: {e}")
+    emotion = new_emotion
+    conf = new_conf
+    prev_emotion = emotion
+    prev_conf = conf
 
     return {
-        "fatigue_score": fatigue,
-        "gaze_direction": gaze,
-        "distraction_score": distraction,
-        "blink_rate": blink_rate,
-        "emotion": emotion,
-        "emotion_confidence": emotion_conf,
-        "body_action": body_action,
+        "fatigue_score": fatigue, "gaze_direction": gaze,
+        "distraction_score": distraction, "blink_rate": blink,
+        "emotion": emotion, "emotion_confidence": conf,
+        "body_action": action,
     }
 
 
-# ── Screen Analysis (Real CV-based) ─────────────────────────────────────────
+def _default():
+    return {
+        "fatigue_score": 0.05, "gaze_direction": "UNKNOWN",
+        "distraction_score": 5.0, "blink_rate": 0.3,
+        "emotion": prev_emotion, "emotion_confidence": 0.3,
+        "body_action": "unknown",
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCREEN ANALYSIS
+# ═══════════════════════════════════════════════════════════════════════════════
 @app.post("/analyze-screen")
 async def analyze_screen(file: UploadFile = File(...)):
     raw = await file.read()
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, _analyze_screen_sync, raw)
-    return result
+    return await asyncio.get_event_loop().run_in_executor(None, _screen, raw)
 
 
-def _analyze_screen_sync(raw: bytes) -> dict:
-    img = decode_image(raw)
+def _screen(raw: bytes) -> dict:
+    img = decode(raw)
     if img is None:
         return {"activity": "UNKNOWN", "distraction_score": 10.0}
 
-    # Resize for faster processing
     h, w = img.shape[:2]
     if w > 640:
-        scale = 640 / w
-        img = cv2.resize(img, (640, int(h * scale)))
+        img = cv2.resize(img, (640, int(h * 640 / w)))
 
-    # ── Color Analysis ───────────────────────────────────────────────────────
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
-    # Average brightness
-    avg_brightness = np.mean(gray)
-
-    # Color variance (high = colorful content like videos/social media)
-    color_std = np.std(hsv[:, :, 1])  # saturation variance
-
-    # ── Edge Density (text indicator) ────────────────────────────────────────
+    avg_bright = np.mean(gray)
+    color_std = np.std(hsv[:, :, 1])
     edges = cv2.Canny(gray, 50, 150)
-    edge_density = np.sum(edges > 0) / edges.size
-
-    # ── Dark Background Detection (IDE/code editor) ──────────────────────────
-    dark_pixels = np.sum(gray < 50) / gray.size
-    is_dark_bg = dark_pixels > 0.4
-
-    # ── Large Uniform Regions (video player) ─────────────────────────────────
+    edge_d = np.sum(edges > 0) / edges.size
+    dark_pix = np.sum(gray < 50) / gray.size
+    is_dark = dark_pix > 0.4
     blur = cv2.GaussianBlur(gray, (21, 21), 0)
-    uniform_score = 1.0 - (np.std(blur) / 128.0)
+    uniform = 1.0 - (np.std(blur) / 128.0)
 
-    # ── Classification Logic ─────────────────────────────────────────────────
-    activity = "BROWSING"
-    distraction = 15.0
-
-    if is_dark_bg and edge_density > 0.08:
-        activity = "CODING"
-        distraction = 3.0
-    elif edge_density > 0.12:
-        activity = "READING"
-        distraction = 8.0
-    elif uniform_score > 0.85 and color_std > 40:
-        activity = "WATCHING"
-        distraction = 45.0
-    elif color_std > 50 and edge_density < 0.06:
-        activity = "SOCIAL_MEDIA"
-        distraction = 60.0
-    elif avg_brightness < 30 and edge_density < 0.03:
-        activity = "IDLE"
-        distraction = 20.0
-
-    return {
-        "activity": activity,
-        "distraction_score": round(distraction, 2),
-    }
+    if is_dark and edge_d > 0.08:
+        return {"activity": "CODING", "distraction_score": 3.0}
+    if edge_d > 0.12:
+        return {"activity": "READING", "distraction_score": 8.0}
+    if uniform > 0.85 and color_std > 40:
+        return {"activity": "WATCHING", "distraction_score": 45.0}
+    if color_std > 50 and edge_d < 0.06:
+        return {"activity": "SOCIAL_MEDIA", "distraction_score": 60.0}
+    if avg_bright < 30 and edge_d < 0.03:
+        return {"activity": "IDLE", "distraction_score": 20.0}
+    return {"activity": "BROWSING", "distraction_score": 15.0}

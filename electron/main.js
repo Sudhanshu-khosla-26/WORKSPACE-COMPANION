@@ -16,13 +16,13 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 // ── Chromium flags (BEFORE app ready) ─────────────────────────────────────────
+// DO NOT use "use-fake-ui-for-media-stream" — it replaces real mic with empty fake stream!
 app.commandLine.appendSwitch("unsafely-treat-insecure-origin-as-secure", "http://localhost:3000");
 app.commandLine.appendSwitch("allow-insecure-localhost", "true");
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
-app.commandLine.appendSwitch("use-fake-ui-for-media-stream");
 app.commandLine.appendSwitch("enable-speech-dispatcher");
-app.commandLine.appendSwitch("enable-features", "WebRTC,MediaFoundationH264Encoding");
-app.commandLine.appendSwitch("enable-speech-input-notifications");
+app.commandLine.appendSwitch("enable-features", "WebRTC,MediaFoundationH264Encoding,WebSpeechAPI");
+app.commandLine.appendSwitch("enable-experimental-web-platform-features");
 app.commandLine.appendSwitch("ignore-certificate-errors");
 
 let mainWindow;

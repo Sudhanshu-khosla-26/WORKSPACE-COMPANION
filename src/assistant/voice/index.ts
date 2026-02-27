@@ -1,9 +1,9 @@
 /**
- * Voice System — Always-On Listener
+ * Voice System — Always-On, Hindi/Hinglish Default
  *
- * Listens to ALL speech continuously. No wake word required.
- * Uses Web Speech API with debouncing and confidence thresholds
- * to avoid sending misheard/partial results.
+ * Listens continuously. No wake word.
+ * Default: hi-IN (Hindi) — catches Hinglish naturally.
+ * Processes EVERY sentence with debouncing.
  */
 
 export class VoiceSystem {
@@ -15,33 +15,27 @@ export class VoiceSystem {
     private animFrame = 0;
     private supported = false;
     private restartPending = false;
-    private restartDelay = 300; // exponential backoff start
+    private restartDelay = 250;
 
-    // Debounce: collect speech, wait for silence, then send
+    // Debounce settings
     private pendingText = "";
     private debounceTimer: ReturnType<typeof setTimeout> | null = null;
-    private DEBOUNCE_MS = 1000; // wait 1s of silence before sending
-    private MIN_CONFIDENCE = 0.4; // lower threshold — let more through
-    private MIN_LENGTH = 2; // ignore very short transcripts
+    private DEBOUNCE_MS = 1200; // 1.2s silence before sending — catches full sentences
+    private MIN_CONFIDENCE = 0.3; // very low — accept almost everything
+    private MIN_LENGTH = 1; // even single words
 
     private onSpeech: (t: string) => void;
     private onSpeakingChange: (s: boolean) => void;
     private onAudioLevel: (l: number) => void;
-    private onWakeWord: () => void;
-    private onAwakeChange: (a: boolean) => void;
 
     constructor(
         onSpeech: (t: string) => void,
         onSpeakingChange: (s: boolean) => void,
         onAudioLevel: (l: number) => void = () => { },
-        onWakeWord: () => void = () => { },
-        onAwakeChange: (a: boolean) => void = () => { }
     ) {
         this.onSpeech = onSpeech;
         this.onSpeakingChange = onSpeakingChange;
         this.onAudioLevel = onAudioLevel;
-        this.onWakeWord = onWakeWord;
-        this.onAwakeChange = onAwakeChange;
         this.init();
     }
 
@@ -49,131 +43,146 @@ export class VoiceSystem {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const SR = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
         if (!SR) {
-            console.error("[Voice] ⚠ SpeechRecognition NOT available.");
+            console.error("[Voice] ⚠ SpeechRecognition NOT available in this environment.");
+            console.error("[Voice] This commonly happens in Electron. Voice will be disabled.");
             return;
         }
         this.supported = true;
-        console.log("[Voice] SpeechRecognition API available ✓");
+        console.log("[Voice] SpeechRecognition API found ✓");
 
         this.rec = new SR();
         this.rec.continuous = true;
-        // Use en-US for maximum compatibility (works in Electron, mobile, all browsers)
-        // Hindi/Hinglish is still recognized — Google's speech engine auto-detects
-        this.rec.lang = "en-US";
-        this.rec.interimResults = false; // Only final results — reduces noise
-        this.rec.maxAlternatives = 3; // Get alternatives for better accuracy
+
+        // Hindi as primary — Google recognizes Hinglish and English within hi-IN
+        this.rec.lang = "hi-IN";
+        this.rec.interimResults = true; // Show interim for faster feedback
+        this.rec.maxAlternatives = 3;
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         this.rec.onresult = (e: any) => {
             for (let i = e.resultIndex; i < e.results.length; i++) {
                 const result = e.results[i];
+
+                // Skip interim results for sending, but we could show them
                 if (!result.isFinal) continue;
 
-                // Get best transcript with confidence check
+                // Pick the best transcript
                 let bestText = "";
                 let bestConf = 0;
 
                 for (let alt = 0; alt < result.length; alt++) {
-                    const transcript = result[alt].transcript.trim();
-                    const confidence = result[alt].confidence || 0.7;
-
-                    if (confidence > bestConf && transcript.length > this.MIN_LENGTH) {
-                        bestText = transcript;
-                        bestConf = confidence;
+                    const text = result[alt].transcript.trim();
+                    const conf = result[alt].confidence || 0.7;
+                    if (conf > bestConf && text.length >= this.MIN_LENGTH) {
+                        bestText = text;
+                        bestConf = conf;
                     }
                 }
 
                 if (!bestText || bestConf < this.MIN_CONFIDENCE) {
-                    console.log(`[Voice] skipped low-confidence: "${bestText}" (${(bestConf * 100).toFixed(0)}%)`);
                     continue;
                 }
 
-                console.log(`[Voice] heard: "${bestText}" (conf: ${(bestConf * 100).toFixed(0)}%)`);
+                console.log(`[Voice] ✓ "${bestText}" (${(bestConf * 100).toFixed(0)}%)`);
 
-                // Accumulate text and debounce
+                // Accumulate
                 this.pendingText += (this.pendingText ? " " : "") + bestText;
 
-                // Reset debounce timer — wait for silence
+                // Reset debounce — wait for full sentence
                 if (this.debounceTimer) clearTimeout(this.debounceTimer);
                 this.debounceTimer = setTimeout(() => {
-                    this.flushPendingText();
+                    this.flush();
                 }, this.DEBOUNCE_MS);
             }
         };
 
         this.rec.onstart = () => {
-            console.log("[Voice] recognition started — always listening ✓");
-            this.restartDelay = 300; // reset backoff on successful start
+            console.log("[Voice] 🎙 listening (hi-IN) — always on");
+            this.restartDelay = 250;
         };
 
-        // Auto-restart on end
         this.rec.onend = () => {
-            console.log("[Voice] recognition ended — restarting...");
             if (this.listening && !this.restartPending) {
-                this.scheduleRestart();
+                this.restart();
             }
         };
 
         this.rec.onerror = (e: Event & { error: string }) => {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const err = (e as any).error;
-            if (err === "no-speech") return; // Normal, just silence
+
+            // "no-speech" is normal — just silence
+            if (err === "no-speech") {
+                // Restart immediately on no-speech (common in Electron)
+                if (this.listening && !this.restartPending) {
+                    this.restart();
+                }
+                return;
+            }
 
             console.warn("[Voice] error:", err);
 
             if (err === "not-allowed") {
-                console.error("[Voice] Microphone DENIED. Check System Privacy → Microphone.");
+                console.error("[Voice] ❌ Microphone BLOCKED. Grant permission in browser/system settings.");
+            }
+            if (err === "service-not-allowed" || err === "network") {
+                console.error("[Voice] ❌ Speech service unavailable — this can happen in Electron. Retrying...");
             }
 
-            // Restart with backoff
             if (this.listening && !this.restartPending) {
-                this.scheduleRestart();
+                this.restart();
             }
         };
     }
 
-    private flushPendingText() {
-        if (!this.pendingText.trim()) return;
+    private flush() {
         const text = this.pendingText.trim();
         this.pendingText = "";
-        console.log("[Voice] → sending to Buddy:", text);
+        if (!text) return;
+        console.log("[Voice] → sending:", text);
         this.onSpeech(text);
     }
 
-    private scheduleRestart() {
+    private restart() {
         this.restartPending = true;
         const delay = this.restartDelay;
-        this.restartDelay = Math.min(this.restartDelay * 1.5, 5000); // max 5s backoff
+        this.restartDelay = Math.min(this.restartDelay * 1.3, 5000);
 
         setTimeout(() => {
             this.restartPending = false;
-            if (this.listening) {
-                try {
-                    this.rec.start();
-                } catch (e) {
-                    console.warn("[Voice] restart failed:", e);
-                }
+            if (!this.listening) return;
+            try {
+                this.rec.start();
+            } catch (e) {
+                console.warn("[Voice] restart failed:", e);
+                // Try again after longer delay
+                setTimeout(() => {
+                    if (this.listening) {
+                        try { this.rec.start(); } catch { /* give up */ }
+                    }
+                }, 2000);
             }
         }, delay);
     }
 
     async startListening() {
         if (!this.supported) {
-            console.error("[Voice] cannot start — SpeechRecognition not supported");
+            console.error("[Voice] SpeechRecognition not supported — voice disabled");
             return;
         }
         this.listening = true;
-        this.onAwakeChange(true);
 
-        // Start mic meter
-        console.log("[Voice] requesting getUserMedia...");
+        // Mic meter for audio level visualization
         await this.startMicMeter();
 
         try {
-            console.log("[Voice] starting always-on speech recognition...");
             this.rec.start();
         } catch (e) {
             console.warn("[Voice] start error:", e);
+            // Retry once
+            setTimeout(() => {
+                try { this.rec.start(); } catch { /* ok */ }
+            }, 500);
         }
     }
 
@@ -194,7 +203,7 @@ export class VoiceSystem {
                     autoGainControl: true,
                 },
             });
-            console.log("[Voice] getUserMedia SUCCESS ✓");
+            console.log("[Voice] microphone access ✓");
 
             this.audioCtx = new AudioContext();
             const src = this.audioCtx.createMediaStreamSource(stream);
@@ -202,6 +211,7 @@ export class VoiceSystem {
             this.analyser.fftSize = 256;
             src.connect(this.analyser);
             const buf = new Uint8Array(this.analyser.frequencyBinCount);
+
             const tick = () => {
                 if (!this.analyser) return;
                 this.analyser.getByteFrequencyData(buf);
@@ -211,10 +221,7 @@ export class VoiceSystem {
             };
             tick();
         } catch (e) {
-            console.error("[Voice] getUserMedia FAILED:", e);
-            if ((e as Error).name === "NotAllowedError") {
-                console.error("[Voice] PERMISSION DENIED: Enable Microphone in Windows Settings → Privacy → Microphone.");
-            }
+            console.error("[Voice] mic access FAILED:", e);
         }
     }
 
@@ -232,22 +239,20 @@ export class VoiceSystem {
             const pref = voices.find(v => /zira|eva|hazel|samantha/i.test(v.name))
                 || voices.find(v => (v.lang || "").startsWith("en-") && v.name.toLowerCase().includes("female"))
                 || voices.find(v => (v.lang || "").startsWith("en"));
-            if (pref) { utter.voice = pref; }
+            if (pref) utter.voice = pref;
         };
         applyVoice();
         if (window.speechSynthesis.getVoices().length === 0) {
             window.speechSynthesis.addEventListener("voiceschanged", applyVoice, { once: true });
         }
 
-        utter.onstart = () => { this.onSpeakingChange(true); };
+        utter.onstart = () => this.onSpeakingChange(true);
         utter.onend = () => { this.onSpeakingChange(false); onEnd?.(); };
         utter.onerror = () => { this.onSpeakingChange(false); onEnd?.(); };
         window.speechSynthesis.speak(utter);
     }
 
-    forceAwake() {
-        this.onAwakeChange(true);
-    }
-
-    isAwake() { return true; } // Always awake
+    isSupported() { return this.supported; }
+    isAwake() { return true; }
+    forceAwake() { /* always awake */ }
 }

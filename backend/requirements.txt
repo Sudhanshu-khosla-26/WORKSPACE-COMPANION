@@ -5,8 +5,4 @@ numpy
 structlog
 python-multipart
 pydantic
-deepface
-pandas
-tf-keras
-tensorflow-cpu
 mediapipe
