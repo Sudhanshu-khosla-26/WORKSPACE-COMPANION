@@ -1,12 +1,12 @@
 /**
- * Voice System — Production Ready
+ * Voice System — Mobile-First, Production Ready
  *
- * Strategy:
- * 1. Try Web Speech API first (works in Chrome on any platform)
- * 2. If it fails or isn't available → use MediaRecorder → backend /transcribe
- * 3. Always capture mic for audio level visualization
+ * Priority: Mobile Chrome + Safari → Desktop Chrome → Electron (backend fallback)
  *
- * Default language: hi-IN (Hindi/Hinglish). Debounce: 1200ms.
+ * Mobile Safari quirks handled:
+ * - continuous mode is unreliable → restart after every final result
+ * - Needs user gesture to start (handled by init flow)
+ * - May fire "end" without "error" — just restart
  */
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
@@ -19,7 +19,9 @@ export class VoiceSystem {
     private active = false;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     private recognition: any = null;
-    private webSpeechWorks = false;
+    private webSpeechOK = false;
+    private isMobile = false;
+    private isSafari = false;
 
     // MediaRecorder fallback
     private recorder: MediaRecorder | null = null;
@@ -35,6 +37,7 @@ export class VoiceSystem {
     // Debounce
     private pending = "";
     private dTimer: ReturnType<typeof setTimeout> | null = null;
+    private restartTimer: ReturnType<typeof setTimeout> | null = null;
 
     constructor(
         onSpeech: (text: string) => void,
@@ -44,13 +47,18 @@ export class VoiceSystem {
         this.onSpeech = onSpeech;
         this.onSpeakingChange = onSpeakingChange;
         this.onAudioLevel = onAudioLevel;
+
+        // Detect platform
+        const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
+        this.isMobile = /iPhone|iPad|iPod|Android|Mobile/i.test(ua);
+        this.isSafari = /Safari/i.test(ua) && !/Chrome|CriOS|Chromium/i.test(ua);
+        console.log(`[Voice] platform: mobile=${this.isMobile} safari=${this.isSafari}`);
     }
 
-    /** Call this and AWAIT it before setting voice status */
     async startListening(): Promise<string> {
         this.active = true;
 
-        // 1. Get mic access
+        // 1. Get mic
         try {
             this.micStream = await navigator.mediaDevices.getUserMedia({
                 audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
@@ -61,178 +69,178 @@ export class VoiceSystem {
             return "error";
         }
 
-        // Audio level meter
         this.setupMeter(this.micStream);
 
         // 2. Try Web Speech API
-        const mode = await this.tryWebSpeech();
-        if (mode === "webspeech") return "webspeech";
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const SR = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
+        if (SR) {
+            return this.initWebSpeech(SR);
+        }
 
-        // 3. Fallback to MediaRecorder
-        this.setupRecorder(this.micStream);
+        // 3. No Web Speech → recorder fallback
+        console.log("[Voice] no Web Speech API → recorder fallback");
+        this.startRecorderFallback();
         return "recorder";
     }
 
-    // ─── Web Speech API ──────────────────────────────────────────────────────
-    private tryWebSpeech(): Promise<string> {
-        return new Promise((resolve) => {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const SR = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
-            if (!SR) {
-                console.log("[Voice] Web Speech API not available");
-                resolve("none");
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Web Speech API — works on Chrome + Safari (mobile & desktop)
+    // ═══════════════════════════════════════════════════════════════════════════
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    private initWebSpeech(SR: any): string {
+        this.recognition = new SR();
+
+        // Safari: continuous mode is broken → use single-shot and restart
+        // Chrome: continuous works fine
+        this.recognition.continuous = !this.isSafari;
+        this.recognition.lang = "hi-IN";
+        this.recognition.interimResults = false;
+        this.recognition.maxAlternatives = 3;
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        this.recognition.onresult = (e: any) => {
+            for (let i = e.resultIndex; i < e.results.length; i++) {
+                const r = e.results[i];
+                if (!r.isFinal) continue;
+
+                let best = "", bestC = 0;
+                for (let a = 0; a < r.length; a++) {
+                    const t = r[a].transcript?.trim() || "";
+                    const c = r[a].confidence ?? 0.8;
+                    if (t.length > 0 && c > bestC) { best = t; bestC = c; }
+                }
+
+                if (best) {
+                    console.log(`[Voice] ✓ "${best}"`);
+                    this.accum(best);
+                }
+            }
+
+            // Safari: must restart after getting results
+            if (this.isSafari && this.active) {
+                this.safeRestart(100);
+            }
+        };
+
+        this.recognition.onstart = () => {
+            this.webSpeechOK = true;
+            console.log("[Voice] 🎙 listening" + (this.isSafari ? " (Safari single-shot)" : " (continuous)"));
+        };
+
+        this.recognition.onend = () => {
+            // Always restart — this is the key to keeping it alive
+            if (this.active) {
+                this.safeRestart(this.isSafari ? 100 : 300);
+            }
+        };
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        this.recognition.onerror = (e: any) => {
+            const err = e.error || "";
+
+            if (err === "no-speech") {
+                // Normal — silence. Restart.
+                if (this.active) this.safeRestart(100);
                 return;
             }
 
-            const rec = new SR();
-            rec.continuous = true;
-            rec.lang = "hi-IN";
-            rec.interimResults = false;
-            rec.maxAlternatives = 3;
-
-            let started = false;
-            let resolved = false;
-
-            const done = (mode: string) => {
-                if (!resolved) { resolved = true; resolve(mode); }
-            };
-
-            rec.onstart = () => {
-                started = true;
-                this.webSpeechWorks = true;
-                console.log("[Voice] Web Speech started ✓ (hi-IN)");
-                done("webspeech");
-            };
-
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            rec.onresult = (e: any) => {
-                for (let i = e.resultIndex; i < e.results.length; i++) {
-                    const r = e.results[i];
-                    if (!r.isFinal) continue;
-
-                    let best = "", bestC = 0;
-                    for (let a = 0; a < r.length; a++) {
-                        const t = r[a].transcript?.trim();
-                        const c = r[a].confidence ?? 0.8;
-                        if (t && c > bestC) { best = t; bestC = c; }
-                    }
-                    if (best.length > 0) {
-                        console.log(`[Voice] heard: "${best}"`);
-                        this.accum(best);
-                    }
-                }
-            };
-
-            rec.onend = () => {
-                if (this.active && this.webSpeechWorks) {
-                    // Auto-restart
-                    setTimeout(() => {
-                        if (!this.active) return;
-                        try { rec.start(); } catch { /* */ }
-                    }, 300);
-                }
-            };
-
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            rec.onerror = (e: any) => {
-                const err = e.error || "";
-                console.warn("[Voice] speech error:", err);
-
-                if (err === "no-speech") {
-                    // Normal — just silence. Restart.
-                    if (this.active && started) {
-                        setTimeout(() => {
-                            if (!this.active) return;
-                            try { rec.start(); } catch { /* */ }
-                        }, 200);
-                    }
-                    return;
-                }
-
-                // Fatal errors → give up on Web Speech, fallback to recorder
-                if (!started || err === "not-allowed" || err === "service-not-allowed" || err === "network") {
-                    console.log("[Voice] Web Speech failed → using recorder");
-                    this.webSpeechWorks = false;
-                    done("none");
-                    return;
-                }
-
-                // Other errors → try restart
-                if (this.active) {
-                    setTimeout(() => {
-                        if (!this.active) return;
-                        try { rec.start(); } catch { /* */ }
-                    }, 500);
-                }
-            };
-
-            this.recognition = rec;
-
-            try {
-                rec.start();
-                // Give it 3 seconds to succeed
-                setTimeout(() => done("none"), 3000);
-            } catch {
-                done("none");
+            if (err === "aborted") {
+                // Safari fires this on restart — normal
+                if (this.active) this.safeRestart(200);
+                return;
             }
-        });
+
+            console.warn("[Voice] error:", err);
+
+            if (err === "not-allowed") {
+                console.error("[Voice] ❌ Mic blocked! Enable in browser settings.");
+                // Don't fallback — user needs to grant permission
+                return;
+            }
+
+            if (err === "service-not-allowed" || err === "network") {
+                // No speech service (Electron) → fallback to recorder
+                console.log("[Voice] no speech service → recorder fallback");
+                this.webSpeechOK = false;
+                this.recognition = null;
+                this.startRecorderFallback();
+                return;
+            }
+
+            // Other errors → restart
+            if (this.active) this.safeRestart(500);
+        };
+
+        try {
+            this.recognition.start();
+            this.webSpeechOK = true;
+            return "webspeech";
+        } catch (e) {
+            console.warn("[Voice] start failed:", e);
+            this.startRecorderFallback();
+            return "recorder";
+        }
     }
 
-    // ─── MediaRecorder → Backend ─────────────────────────────────────────────
-    private setupRecorder(stream: MediaStream) {
-        console.log("[Voice] setting up MediaRecorder → backend");
+    private safeRestart(delay: number) {
+        if (this.restartTimer) clearTimeout(this.restartTimer);
+        this.restartTimer = setTimeout(() => {
+            if (!this.active || !this.recognition) return;
+            try {
+                this.recognition.start();
+            } catch {
+                // Already running or can't start — try again
+                setTimeout(() => {
+                    if (!this.active || !this.recognition) return;
+                    try { this.recognition.start(); } catch { /* give up */ }
+                }, 500);
+            }
+        }, delay);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // MediaRecorder → Backend /transcribe (Electron / fallback)
+    // ═══════════════════════════════════════════════════════════════════════════
+    private startRecorderFallback() {
+        if (!this.micStream || !this.active) return;
+        console.log("[Voice] starting MediaRecorder fallback");
 
         const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
             ? "audio/webm;codecs=opus"
-            : MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" : "";
+            : MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm"
+                : MediaRecorder.isTypeSupported("audio/mp4") ? "audio/mp4" : "";
 
         if (!mime) {
-            console.error("[Voice] no supported audio format for MediaRecorder");
+            console.error("[Voice] no audio format supported");
             return;
         }
 
-        this.startRecordCycle(stream, mime);
+        this.recordCycle(mime);
     }
 
-    private startRecordCycle(stream: MediaStream, mime: string) {
-        if (!this.active) return;
+    private recordCycle(mime: string) {
+        if (!this.active || !this.micStream) return;
 
-        const mr = new MediaRecorder(stream, { mimeType: mime });
+        const mr = new MediaRecorder(this.micStream, { mimeType: mime });
         this.chunks = [];
-
-        mr.ondataavailable = (e) => {
-            if (e.data.size > 0) this.chunks.push(e.data);
-        };
+        mr.ondataavailable = (e) => { if (e.data.size > 0) this.chunks.push(e.data); };
 
         mr.onstop = () => {
             const blob = new Blob(this.chunks, { type: mime });
             this.chunks = [];
-
-            if (blob.size > 4000 && this.active) {
-                this.transcribe(blob);
-            }
-
-            // Start next cycle
-            if (this.active) {
-                this.recTimer = setTimeout(() => this.startRecordCycle(stream, mime), 200);
-            }
+            if (blob.size > 4000) this.transcribe(blob);
+            if (this.active) this.recTimer = setTimeout(() => this.recordCycle(mime), 200);
         };
 
         try {
             mr.start();
             this.recorder = mr;
-
-            // Stop after 3 seconds
             setTimeout(() => {
-                if (mr.state === "recording") {
-                    try { mr.stop(); } catch { /* */ }
-                }
+                if (mr.state === "recording") try { mr.stop(); } catch { /* */ }
             }, 3000);
-        } catch (e) {
-            console.warn("[Voice] recorder start error:", e);
-            if (this.active) {
-                this.recTimer = setTimeout(() => this.startRecordCycle(stream, mime), 1000);
-            }
+        } catch {
+            if (this.active) this.recTimer = setTimeout(() => this.recordCycle(mime), 1000);
         }
     }
 
@@ -242,18 +250,17 @@ export class VoiceSystem {
             form.append("file", blob, "audio.webm");
             const res = await fetch(`${BACKEND}/transcribe`, { method: "POST", body: form });
             if (!res.ok) return;
-            const data = await res.json();
-            const text = data.text?.trim();
-            if (text) {
+            const { text } = await res.json();
+            if (text?.trim()) {
                 console.log(`[Voice:backend] "${text}"`);
-                this.accum(text);
+                this.accum(text.trim());
             }
-        } catch (e) {
-            console.warn("[Voice] transcribe err:", e);
-        }
+        } catch { /* network error — skip */ }
     }
 
-    // ─── Shared ──────────────────────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Shared
+    // ═══════════════════════════════════════════════════════════════════════════
     private accum(text: string) {
         this.pending += (this.pending ? " " : "") + text;
         if (this.dTimer) clearTimeout(this.dTimer);
@@ -264,7 +271,7 @@ export class VoiceSystem {
                 console.log("[Voice] → Buddy:", t);
                 this.onSpeech(t);
             }
-        }, 1200);
+        }, 800);
     }
 
     private setupMeter(stream: MediaStream) {
@@ -282,13 +289,14 @@ export class VoiceSystem {
                 this.raf = requestAnimationFrame(tick);
             };
             tick();
-        } catch { /* meter is optional */ }
+        } catch { /* optional */ }
     }
 
     stopListening() {
         this.active = false;
         if (this.dTimer) clearTimeout(this.dTimer);
         if (this.recTimer) clearTimeout(this.recTimer);
+        if (this.restartTimer) clearTimeout(this.restartTimer);
         try { this.recognition?.stop(); } catch { /* */ }
         try { if (this.recorder?.state === "recording") this.recorder.stop(); } catch { /* */ }
         cancelAnimationFrame(this.raf);
@@ -299,15 +307,12 @@ export class VoiceSystem {
     speak(text: string, onEnd?: () => void) {
         if (!text) { onEnd?.(); return; }
         window.speechSynthesis.cancel();
-
         const u = new SpeechSynthesisUtterance(text);
         u.rate = 1.05; u.pitch = 1.05;
-
         const voices = window.speechSynthesis.getVoices();
         const v = voices.find(v => /zira|eva|hazel|samantha/i.test(v.name))
             || voices.find(v => (v.lang || "").startsWith("en"));
         if (v) u.voice = v;
-
         u.onstart = () => this.onSpeakingChange(true);
         u.onend = () => { this.onSpeakingChange(false); onEnd?.(); };
         u.onerror = () => { this.onSpeakingChange(false); onEnd?.(); };

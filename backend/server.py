@@ -14,6 +14,9 @@ import tempfile
 import os
 from collections import deque
 
+import json
+import os
+
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -23,21 +26,42 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── MediaPipe ────────────────────────────────────────────────────────────────
+# ── MediaPipe Tasks API ──────────────────────────────────────────────────────
 MEDIAPIPE_OK = False
-FACE_MESH = None
+face_detector = None
 try:
     import mediapipe as mp
-    FACE_MESH = mp.solutions.face_mesh.FaceMesh(
-        max_num_faces=1,
-        refine_landmarks=True,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5,
-    )
-    MEDIAPIPE_OK = True
-    print("[✓] MediaPipe loaded")
+    from mediapipe.tasks import python
+    from mediapipe.tasks.python import vision
+    
+    model_path = os.path.join(os.path.dirname(__file__), 'face_landmarker.task')
+    if os.path.exists(model_path):
+        base_options = python.BaseOptions(model_asset_path=model_path)
+        options = vision.FaceLandmarkerOptions(
+            base_options=base_options,
+            output_face_blendshapes=False,
+            output_facial_transformation_matrixes=False,
+            num_faces=1
+        )
+        face_detector = vision.FaceLandmarker.create_from_options(options)
+        MEDIAPIPE_OK = True
+        print("[✓] MediaPipe FaceLandmarker loaded")
+    else:
+        print("[✗] MediaPipe: face_landmarker.task model missing")
 except Exception as e:
     print(f"[✗] MediaPipe: {e}")
+
+# ── Load Calibration ─────────────────────────────────────────────────────────
+calib_path = os.path.join(os.path.dirname(__file__), 'calibration.json')
+CALIB = {}
+if os.path.exists(calib_path):
+    try:
+        with open(calib_path, "r") as f:
+            CALIB = json.load(f)
+        print("[✓] Calibration loaded")
+    except Exception as e:
+        print(f"[WARN] Calibration load failed: {e}")
+
 
 # ── Haar cascade fallback for face detection ─────────────────────────────────
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
@@ -162,7 +186,7 @@ def _face(raw: bytes) -> dict:
     blink = 0.28
     action = "normal"
 
-    if not MEDIAPIPE_OK or not FACE_MESH:
+    if not MEDIAPIPE_OK or not face_detector:
         # Haar cascade fallback — just detect face presence
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         faces = face_cascade.detectMultiScale(gray, 1.3, 5)
@@ -178,9 +202,10 @@ def _face(raw: bytes) -> dict:
 
     # ── MediaPipe analysis ───────────────────────────────────────────────────
     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    mesh = FACE_MESH.process(rgb)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+    result = face_detector.detect(mp_image)
 
-    if not mesh.multi_face_landmarks:
+    if not result.face_landmarks:
         head_down_n += 1
         if head_down_n > 5:
             action = "no_face"
@@ -192,7 +217,24 @@ def _face(raw: bytes) -> dict:
             "body_action": action,
         }
 
-    lm = mesh.multi_face_landmarks[0].landmark
+    lm = result.face_landmarks[0]
+
+    # ── Calculate dynamic feature thresholds from CALIB ──────────────────────
+    # Fallback default values
+    th_ear = 0.22
+    th_nose = 0.65
+    th_mouth = 0.08
+    th_brow = 0.015
+
+    if "fatigue" in CALIB and "focus" in CALIB:
+        f_avg = CALIB["fatigue"]["avg"]
+        fc_avg = CALIB["focus"]["avg"]
+        th_ear = (f_avg["ear"] + fc_avg["ear"]) / 2.0
+        th_nose = (f_avg["nose_pos"] + fc_avg["nose_pos"]) / 2.0
+    if "happy" in CALIB:
+        th_mouth = CALIB["happy"]["avg"]["mouth_ratio"] * 0.7
+    if "sad" in CALIB:
+        th_brow = CALIB["sad"]["avg"]["brow_raise"] * 1.2
 
     # ── EAR (Eye Aspect Ratio) ───────────────────────────────────────────────
     def ear(idx):
@@ -212,19 +254,19 @@ def _face(raw: bytes) -> dict:
     face_h = abs(chin.y - forehead.y)
     nose_pos = (nose.y - forehead.y) / face_h if face_h > 0 else 0.5
 
-    if nose_pos > 0.65:
+    if nose_pos > th_nose:
         head_down_n += 1
         action = "head_down"
     else:
         head_down_n = max(0, head_down_n - 1)
 
-    if nose_pos < 0.40:
+    if nose_pos < (th_nose * 0.6):
         action = "looking_up"
 
-    pitch_f = max(0, min(1, (nose_pos - 0.55) / 0.2))
-    ear_f = max(0, min(1, (0.26 - avg_ear) / 0.1))
+    pitch_f = max(0, min(1, (nose_pos - (th_nose * 0.8)) / 0.2))
+    ear_f = max(0, min(1, ((th_ear * 1.2) - avg_ear) / (th_ear * 0.5)))
 
-    if avg_ear < 0.22:
+    if avg_ear < th_ear:
         eyes_low_n += 1
     else:
         eyes_low_n = max(0, eyes_low_n - 1)
@@ -251,80 +293,56 @@ def _face(raw: bytes) -> dict:
     gaze = "CENTER" if abs(eye_x - nose_x) < 0.03 else ("RIGHT" if eye_x > nose_x else "LEFT")
 
     # ── Distraction (ROLLING WINDOW — not instant) ─────────────────────────────
-    # Track gaze in history window
     is_off_center = 1 if gaze != "CENTER" else 0
     gaze_history.append(is_off_center)
-
-    # Only count as distracted if SUSTAINED off-center (6+ of last 10 readings)
     off_count = sum(gaze_history) if len(gaze_history) > 0 else 0
     off_ratio = off_count / max(len(gaze_history), 1)
 
-    # Gradual ramp — not instant jump
     raw_d = 0.0
-    if off_ratio > 0.6:  # Sustained off-center (3+ seconds)
+    if off_ratio > 0.6:
         raw_d += 40 * off_ratio
-    elif off_ratio > 0.3:  # Moderate looking away
+    elif off_ratio > 0.3:
         raw_d += 15 * off_ratio
-    # else: brief glances = 0 distraction (normal behavior)
 
     if abs(roll) > 15 and off_ratio > 0.4:
         raw_d += 10
-    if action == "head_down" and head_down_n > 5:  # Long head down = might be sleeping
+    if action == "head_down" and head_down_n > 5:
         raw_d += 15
 
     distraction = round(max(2, min(95, raw_d)), 2)
     distraction_history.append(distraction)
-
-    # Smooth output: average of recent readings
     distraction = round(sum(distraction_history) / max(len(distraction_history), 1), 2)
 
-    # ── Emotion from landmarks (no TensorFlow!) ──────────────────────────────
-    # Mouth measurements
+    # ── Emotion from landmarks ───────────────────────────────────────────────
     mouth_w = abs(lm[291].x - lm[61].x)
     mouth_h = abs(lm[14].y - lm[13].y)
-    lip_top = lm[13].y
-    lip_bot = lm[14].y
-    mouth_open = lip_bot - lip_top
+    mouth_open = lm[14].y - lm[13].y
     m_ratio = mouth_h / mouth_w if mouth_w > 0 else 0.0
 
-    # Inner lip distance (smile indicator)
     left_lip = lm[61]
     right_lip = lm[291]
-    upper_mid = lm[0]
-    lower_mid = lm[17]
     lip_stretch = abs(right_lip.x - left_lip.x)
 
-    # Brow measurements
     left_brow = (lm[107].y + lm[66].y) / 2
     right_brow = (lm[336].y + lm[296].y) / 2
     avg_brow = (left_brow + right_brow) / 2
     nose_bridge = lm[6].y
-    brow_raise = nose_bridge - avg_brow  # positive = brows raised
+    brow_raise = nose_bridge - avg_brow
 
-    # Inner brow distance (furrowed = angry/sad)
-    inner_left_brow = lm[107].y
-    inner_right_brow = lm[336].y
-    brow_furrow = abs(inner_left_brow - inner_right_brow)
-
-    # Classify emotion from geometry
     new_emotion = "neutral"
     new_conf = 0.85
 
-    if m_ratio > 0.35 and brow_raise > 0.04:
-        # Wide open mouth + raised brows = surprised
+    if m_ratio > (th_mouth * 4.0) and brow_raise > (th_brow * 2.5):
         new_emotion = "surprised"
         new_conf = 0.9
-    elif m_ratio > 0.08 and lip_stretch > 0.14 and mouth_open > 0.005:
-        # Open mouth + wide lips = happy/smiling
+    elif m_ratio > th_mouth and lip_stretch > 0.14:
         new_emotion = "happy"
         new_conf = 0.85
-    elif avg_ear < 0.20 and pitch_f > 0.5:
-        # Droopy eyes + head down = tired
+    elif avg_ear < th_ear and pitch_f > 0.5:
         new_emotion = "tired"
         new_conf = 0.9
-    elif brow_raise < 0.015 and m_ratio < 0.04:
-        # Lowered brows + tight mouth = sad or angry
-        if avg_ear < 0.23:
+    elif brow_raise < th_brow and m_ratio < (th_mouth * 0.5):
+        if avg_ear < th_ear:
             new_emotion = "sad"
             new_conf = 0.75
         else:
