@@ -10,6 +10,9 @@ import cv2
 import numpy as np
 import asyncio
 import math
+import tempfile
+import os
+from collections import deque
 
 app = FastAPI()
 app.add_middleware(
@@ -45,6 +48,19 @@ prev_conf = 0.5
 head_down_n = 0
 eyes_low_n = 0
 
+# Rolling window for gaze (10 readings = ~5 seconds at 2fps)
+gaze_history = deque(maxlen=10)
+distraction_history = deque(maxlen=10)
+
+# ── Speech Recognition ───────────────────────────────────────────────────────
+SR_AVAILABLE = False
+try:
+    import speech_recognition as sr
+    SR_AVAILABLE = True
+    print("[✓] SpeechRecognition loaded")
+except Exception as e:
+    print(f"[✗] SpeechRecognition: {e}")
+
 
 def decode(data: bytes):
     arr = np.frombuffer(data, np.uint8)
@@ -53,7 +69,73 @@ def decode(data: bytes):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "mediapipe": MEDIAPIPE_OK}
+    return {"status": "ok", "mediapipe": MEDIAPIPE_OK, "speech": SR_AVAILABLE}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AUDIO TRANSCRIPTION (fallback for Electron / mobile Safari)
+# ═══════════════════════════════════════════════════════════════════════════════
+@app.post("/transcribe")
+async def transcribe(file: UploadFile = File(...)):
+    if not SR_AVAILABLE:
+        return {"text": "", "error": "SpeechRecognition not installed"}
+
+    raw = await file.read()
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _transcribe, raw, file.filename or "audio.webm")
+
+
+def _transcribe(raw: bytes, filename: str) -> dict:
+    try:
+        recognizer = sr.Recognizer()
+        recognizer.energy_threshold = 300
+        recognizer.dynamic_energy_threshold = True
+
+        # Save to temp file
+        ext = os.path.splitext(filename)[1] or ".webm"
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:
+            f.write(raw)
+            tmp_path = f.name
+
+        try:
+            # Convert to WAV if needed (pydub handles webm/ogg/mp3)
+            wav_path = tmp_path
+            if ext != ".wav":
+                try:
+                    from pydub import AudioSegment
+                    audio = AudioSegment.from_file(tmp_path)
+                    wav_path = tmp_path + ".wav"
+                    audio.export(wav_path, format="wav")
+                except Exception:
+                    # If pydub fails, try direct
+                    wav_path = tmp_path
+
+            with sr.AudioFile(wav_path) as source:
+                audio_data = recognizer.record(source)
+
+            # Try Hindi first, then English
+            text = ""
+            try:
+                text = recognizer.recognize_google(audio_data, language="hi-IN")
+            except sr.UnknownValueError:
+                try:
+                    text = recognizer.recognize_google(audio_data, language="en-US")
+                except sr.UnknownValueError:
+                    text = ""
+
+            print(f"[Transcribe] → '{text}'")
+            return {"text": text.strip(), "error": None}
+
+        finally:
+            try: os.unlink(tmp_path)
+            except: pass
+            if wav_path != tmp_path:
+                try: os.unlink(wav_path)
+                except: pass
+
+    except Exception as e:
+        print(f"[Transcribe] error: {e}")
+        return {"text": "", "error": str(e)}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -168,13 +250,33 @@ def _face(raw: bytes) -> dict:
     eye_x = (le.x + re.x) / 2
     gaze = "CENTER" if abs(eye_x - nose_x) < 0.03 else ("RIGHT" if eye_x > nose_x else "LEFT")
 
-    # ── Distraction ──────────────────────────────────────────────────────────
+    # ── Distraction (ROLLING WINDOW — not instant) ─────────────────────────────
+    # Track gaze in history window
+    is_off_center = 1 if gaze != "CENTER" else 0
+    gaze_history.append(is_off_center)
+
+    # Only count as distracted if SUSTAINED off-center (6+ of last 10 readings)
+    off_count = sum(gaze_history) if len(gaze_history) > 0 else 0
+    off_ratio = off_count / max(len(gaze_history), 1)
+
+    # Gradual ramp — not instant jump
     raw_d = 0.0
-    if gaze != "CENTER": raw_d += 40
-    if pitch_f > 0.5: raw_d += 20
-    if abs(roll) > 12: raw_d += 15
-    if action == "head_down" and head_down_n > 3: raw_d += 10
+    if off_ratio > 0.6:  # Sustained off-center (3+ seconds)
+        raw_d += 40 * off_ratio
+    elif off_ratio > 0.3:  # Moderate looking away
+        raw_d += 15 * off_ratio
+    # else: brief glances = 0 distraction (normal behavior)
+
+    if abs(roll) > 15 and off_ratio > 0.4:
+        raw_d += 10
+    if action == "head_down" and head_down_n > 5:  # Long head down = might be sleeping
+        raw_d += 15
+
     distraction = round(max(2, min(95, raw_d)), 2)
+    distraction_history.append(distraction)
+
+    # Smooth output: average of recent readings
+    distraction = round(sum(distraction_history) / max(len(distraction_history), 1), 2)
 
     # ── Emotion from landmarks (no TensorFlow!) ──────────────────────────────
     # Mouth measurements

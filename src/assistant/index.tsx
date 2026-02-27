@@ -234,13 +234,13 @@ export const AssistantEngine: React.FC = () => {
             voiceRef.current = new VoiceSystem(
                 handleSpeech,
                 () => { /* speaking handled by BuddyLive */ },
-                () => { /* mic level — not needed when buddy speaks */ },
+                setAudioLevel,
             );
-            voiceRef.current.startListening();
+            const mode = await voiceRef.current.startListening();
             setIsListening(true);
             setAwake(true);
             setVoiceStatus("on");
-            console.log("[Engine] voice STT started — always listening ✓");
+            console.log(`[Engine] voice started — mode: ${mode} ✓`);
 
             // Automatic Greet after short delay
             setTimeout(() => {

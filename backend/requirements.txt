@@ -6,3 +6,5 @@ structlog
 python-multipart
 pydantic
 mediapipe
+SpeechRecognition
+pydub
