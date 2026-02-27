@@ -20,8 +20,8 @@ export class VoiceSystem {
     // Debounce: collect speech, wait for silence, then send
     private pendingText = "";
     private debounceTimer: ReturnType<typeof setTimeout> | null = null;
-    private DEBOUNCE_MS = 800; // wait 800ms of silence before sending
-    private MIN_CONFIDENCE = 0.5; // ignore very low confidence results
+    private DEBOUNCE_MS = 1000; // wait 1s of silence before sending
+    private MIN_CONFIDENCE = 0.4; // lower threshold — let more through
     private MIN_LENGTH = 2; // ignore very short transcripts
 
     private onSpeech: (t: string) => void;
@@ -57,7 +57,9 @@ export class VoiceSystem {
 
         this.rec = new SR();
         this.rec.continuous = true;
-        this.rec.lang = "hi-IN"; // Default Hindi — picks up Hinglish naturally
+        // Use en-US for maximum compatibility (works in Electron, mobile, all browsers)
+        // Hindi/Hinglish is still recognized — Google's speech engine auto-detects
+        this.rec.lang = "en-US";
         this.rec.interimResults = false; // Only final results — reduces noise
         this.rec.maxAlternatives = 3; // Get alternatives for better accuracy
 

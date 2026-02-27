@@ -18,7 +18,7 @@ export default function RootLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en" className={outfit.className}>
-      <body className="antialiased overflow-hidden">{children}</body>
+      <body className="antialiased overflow-hidden" style={{ background: "transparent" }}>{children}</body>
     </html>
   );
 }

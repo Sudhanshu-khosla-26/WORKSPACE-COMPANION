@@ -284,60 +284,82 @@ export const AssistantEngine: React.FC = () => {
     };
     const eColor = emotionColor[displayState.lastEmotion] ?? "#64748b";
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const electronAPI = typeof window !== "undefined" ? (window as any).electronAPI : null;
+
+    // Toggle click-through when mouse enters/leaves interactive areas
+    const handleMouseEnter = () => electronAPI?.setInteractive?.(true);
+    const handleMouseLeave = () => electronAPI?.setInteractive?.(false);
+
     return (
         <div
-            className="min-h-screen flex flex-col"
             style={{
-                background: "radial-gradient(ellipse at 50% -10%, #0a0a12 0%, #000000 65%)",
+                position: "fixed",
+                inset: 0,
+                background: "transparent",
                 fontFamily: "'Outfit', sans-serif",
+                overflow: "hidden",
+                pointerEvents: "none", // entire overlay is click-through by default
             }}
         >
-            {/* ── Top bar ──────────────────────────────────────── */}
-            <header className="flex items-center justify-between px-8 py-5">
-                <div>
-                    <h1 style={{ letterSpacing: "0.28em", fontSize: 16, fontWeight: 300, color: "#cbd5e1", textTransform: "uppercase" }}>
-                        Hey Buddy
-                    </h1>
-                    <p style={{ fontSize: 10, color: "#334155", letterSpacing: "0.2em", marginTop: 2 }}>
-                        your ai companion
-                    </p>
-                </div>
+            {/* ── GREEN SCREEN BORDER (like macOS recording) ────────── */}
+            {initialized && camStatus === "on" && (
+                <>
+                    <div style={{
+                        position: "fixed", top: 0, left: 0, right: 0, height: 3,
+                        background: "linear-gradient(90deg, transparent, #22c55e, transparent)",
+                        boxShadow: "0 0 12px rgba(34,197,94,0.5), 0 0 30px rgba(34,197,94,0.2)",
+                        animation: "borderPulse 3s ease-in-out infinite",
+                        zIndex: 9999,
+                    }} />
+                    <div style={{
+                        position: "fixed", bottom: 0, left: 0, right: 0, height: 3,
+                        background: "linear-gradient(90deg, transparent, #22c55e, transparent)",
+                        boxShadow: "0 2px 12px rgba(34,197,94,0.5)",
+                        animation: "borderPulse 3s ease-in-out infinite",
+                        zIndex: 9999,
+                    }} />
+                    <div style={{
+                        position: "fixed", top: 0, left: 0, bottom: 0, width: 3,
+                        background: "linear-gradient(180deg, transparent, #22c55e, transparent)",
+                        boxShadow: "-2px 0 12px rgba(34,197,94,0.5)",
+                        animation: "borderPulse 3s ease-in-out infinite",
+                        zIndex: 9999,
+                    }} />
+                    <div style={{
+                        position: "fixed", top: 0, right: 0, bottom: 0, width: 3,
+                        background: "linear-gradient(180deg, transparent, #22c55e, transparent)",
+                        boxShadow: "2px 0 12px rgba(34,197,94,0.5)",
+                        animation: "borderPulse 3s ease-in-out infinite",
+                        zIndex: 9999,
+                    }} />
+                </>
+            )}
 
-                {initialized && (
-                    <div className="flex items-center gap-5">
-                        {/* Live API status */}
-                        <StatusDot
-                            status={liveStatus === "ready" ? "ok" : liveStatus === "connecting" ? "loading" : "err"}
-                            label={liveStatus === "ready" ? "live · ready" : liveStatus === "connecting" ? "live connecting" : "live error"}
-                        />
-                        {/* Camera status */}
-                        <StatusDot
-                            status={camStatus === "on" ? "ok" : camStatus === "starting" ? "loading" : camStatus === "error" ? "err" : "off"}
-                            label={camStatus === "on" ? `cam · ${frameCount}` : camStatus === "starting" ? "cam starting" : camStatus === "error" ? "cam error" : "cam off"}
-                        />
-                        {/* Voice status */}
-                        <StatusDot
-                            status={voiceStatus === "on" ? "ok" : voiceStatus === "error" ? "err" : "off"}
-                            label={voiceStatus === "on" ? "🎙 always listening" : "mic off"}
-                        />
-                    </div>
-                )}
-            </header>
+            {/* ── BUDDY ORB (bottom-right corner) ──────────────────── */}
+            <div
+                onMouseEnter={handleMouseEnter}
+                onMouseLeave={handleMouseLeave}
+                style={{
+                    position: "fixed",
+                    bottom: 30,
+                    right: 30,
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    gap: 12,
+                    zIndex: 10000,
+                    pointerEvents: "auto", // interactive zone
+                }}
+            >
+                {/* Webcam preview */}
+                <WebcamPreview
+                    stream={null}
+                    active={camStatus === "on"}
+                    emotion={displayState.lastEmotion}
+                />
 
-            {/* ── Orb + Camera Preview ─────────────────────────── */}
-            <main className="flex-1 flex flex-col items-center justify-center gap-6 px-8 relative">
-                {/* Floating Webcam Preview */}
-                <div style={{ position: "absolute", top: 20, right: 30, zIndex: 10 }}>
-                    <p style={{ fontSize: 9, color: "#334155", letterSpacing: "0.2em", marginBottom: 8, textAlign: "right" }}>
-                        AI VISION
-                    </p>
-                    <WebcamPreview
-                        stream={null}
-                        active={camStatus === "on"}
-                        emotion={displayState.lastEmotion}
-                    />
-                </div>
-
+                {/* The Orb */}
                 <AssistantOrb
                     isListening={isListening && awake}
                     isSpeaking={isSpeaking}
@@ -345,75 +367,127 @@ export const AssistantEngine: React.FC = () => {
                     audioLevel={audioLevel}
                 />
 
-                {/* State label */}
-                <div style={{ fontSize: 11, letterSpacing: "0.3em", color: "#475569", textTransform: "uppercase", marginTop: -8 }}>
-                    {isSpeaking ? "Speaking" : awake ? "Listening" : initialized ? "Idle" : ""}
-                </div>
-
-                {/* Transcript bubble */}
-                {transcript && (
+                {/* Compact status line */}
+                {initialized && (
                     <div style={{
-                        background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)",
-                        borderRadius: 16, padding: "10px 18px", maxWidth: 420, textAlign: "center",
-                        backdropFilter: "blur(8px)",
+                        display: "flex", gap: 8, alignItems: "center",
+                        background: "rgba(0,0,0,0.6)",
+                        backdropFilter: "blur(12px)",
+                        borderRadius: 20,
+                        padding: "4px 12px",
+                        border: "1px solid rgba(255,255,255,0.06)",
                     }}>
-                        <p style={{ fontSize: 13, color: "#94a3b8", fontStyle: "italic" }}>"{transcript}"</p>
+                        <StatusDot
+                            status={liveStatus === "ready" ? "ok" : liveStatus === "connecting" ? "loading" : "err"}
+                            label=""
+                        />
+                        <StatusDot
+                            status={camStatus === "on" ? "ok" : camStatus === "error" ? "err" : "off"}
+                            label=""
+                        />
+                        <StatusDot
+                            status={voiceStatus === "on" ? "ok" : "off"}
+                            label=""
+                        />
+                        <span style={{ fontSize: 9, color: "#64748b", letterSpacing: "0.1em" }}>
+                            {displayState.lastEmotion}
+                        </span>
                     </div>
                 )}
+            </div>
 
-                {/* AI reply bubble */}
-                {/* {ariaReply && (
-                    <div style={{
-                        background: "rgba(129, 140, 248, 0.08)", border: "1px solid rgba(129, 140, 248, 0.15)",
-                        borderRadius: "16px 16px 16px 0px", padding: "14px 22px", maxWidth: 400,
-                        textAlign: "left", backdropFilter: "blur(12px)",
-                        boxShadow: "0 8px 32px rgba(0,0,0,0.2)",
-                        animation: "fadeInUp 0.3s ease-out",
-                    }}>
-                        <p style={{ fontSize: 8, color: "#818cf8", letterSpacing: "0.2em", marginBottom: 6, fontWeight: 700 }}>SOOTHING COMPANION · JEE FOCUS</p>
-                        <p style={{ fontSize: 13, color: "#cbd5e1", lineHeight: 1.6, fontWeight: 400 }}>{ariaReply}</p>
-                    </div>
-                )} */}
-
-                {/* Welcome message when not yet fully ready */}
-                {!initialized && (
-                    <div style={{ textAlign: "center", marginTop: 24 }}>
-                        <p style={{ fontSize: 12, color: "#475569" }}>
-                            {statusMsg}
-                        </p>
-                    </div>
-                )}
-            </main>
-
-            {/* ── Live stats bar ────────────────────────────────── */}
+            {/* ── FLOATING STATS (top-right, small) ────────────────── */}
             {initialized && (
-                <footer style={{
-                    margin: "0 24px 24px",
-                    background: "rgba(255,255,255,0.03)",
-                    border: "1px solid rgba(255,255,255,0.07)",
-                    borderRadius: 20, padding: "20px 28px",
-                    backdropFilter: "blur(12px)",
-                    display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24,
-                }}>
-                    {/* Left: visual bars */}
-                    <div>
-                        <p style={{ fontSize: 9, letterSpacing: "0.25em", color: "#334155", marginBottom: 14, textTransform: "uppercase" }}>
-                            User State {frameCount > 0 && <span style={{ color: "#22d3ee" }}>· {frameCount} frames</span>}
-                        </p>
-                        <LiveBar label="Fatigue" pct={displayState.fatigue * 100} color="#f97316" />
-                        <LiveBar label="Focus" pct={displayState.focus} color="#34d399" />
-                        <LiveBar label="Distraction" pct={displayState.distraction} color="#f43f5e" />
-                    </div>
-                    {/* Right: context */}
-                    <div>
-                        <p style={{ fontSize: 9, letterSpacing: "0.25em", color: "#334155", marginBottom: 14, textTransform: "uppercase" }}>Context</p>
-                        <ContextRow label="Screen" value={screenActivity} />
-                        <ContextRow label="Emotion" value={displayState.lastEmotion} color={eColor} />
-                        <ContextRow label="Memory" value={`${memoryStore.getAll().length} entries`} />
-                        <ContextRow label="Last seen" value={lastUpdate > 0 ? new Date(lastUpdate).toLocaleTimeString() : "—"} />
-                    </div>
-                </footer>
+                <div
+                    onMouseEnter={handleMouseEnter}
+                    onMouseLeave={handleMouseLeave}
+                    style={{
+                        position: "fixed",
+                        top: 20,
+                        right: 20,
+                        background: "rgba(0,0,0,0.65)",
+                        backdropFilter: "blur(16px)",
+                        borderRadius: 14,
+                        padding: "10px 16px",
+                        border: "1px solid rgba(255,255,255,0.06)",
+                        zIndex: 10000,
+                        pointerEvents: "auto",
+                        minWidth: 140,
+                    }}
+                >
+                    <p style={{ fontSize: 8, color: "#475569", letterSpacing: "0.2em", marginBottom: 8, textTransform: "uppercase" }}>
+                        buddy · live
+                    </p>
+                    <LiveBar label="Fatigue" pct={displayState.fatigue * 100} color="#f97316" />
+                    <LiveBar label="Focus" pct={displayState.focus} color="#34d399" />
+                    <LiveBar label="Distraction" pct={displayState.distraction} color="#f43f5e" />
+                </div>
             )}
+
+            {/* ── Transcript bubble (floating center-bottom) ───────── */}
+            {transcript && (
+                <div style={{
+                    position: "fixed",
+                    bottom: 200,
+                    left: "50%",
+                    transform: "translateX(-50%)",
+                    background: "rgba(0,0,0,0.7)",
+                    backdropFilter: "blur(12px)",
+                    border: "1px solid rgba(255,255,255,0.08)",
+                    borderRadius: 16,
+                    padding: "8px 20px",
+                    maxWidth: 420,
+                    textAlign: "center",
+                    zIndex: 10000,
+                    pointerEvents: "none",
+                }}>
+                    <p style={{ fontSize: 13, color: "#94a3b8", fontStyle: "italic" }}>"{transcript}"</p>
+                </div>
+            )}
+
+            {/* ── Init screen (only before ready) ──────────────────── */}
+            {!initialized && (
+                <div style={{
+                    position: "fixed",
+                    inset: 0,
+                    display: "flex",
+                    flexDirection: "column",
+                    justifyContent: "center",
+                    alignItems: "center",
+                    background: "rgba(0,0,0,0.95)",
+                    zIndex: 99999,
+                    pointerEvents: "auto",
+                }}>
+                    <div style={{
+                        width: 60, height: 60, borderRadius: "50%",
+                        border: "2px solid rgba(99,102,241,0.3)",
+                        borderTopColor: "#6366f1",
+                        animation: "spin 1s linear infinite",
+                    }} />
+                    <p style={{ fontSize: 12, color: "#475569", marginTop: 20, letterSpacing: "0.15em" }}>
+                        {statusMsg}
+                    </p>
+                </div>
+            )}
+
+            {/* ── Keyframe styles ──────────────────────────────────── */}
+            <style>{`
+                @keyframes borderPulse {
+                    0%, 100% { opacity: 0.7; }
+                    50% { opacity: 1; }
+                }
+                @keyframes spin {
+                    to { transform: rotate(360deg); }
+                }
+                @keyframes fadeInUp {
+                    from { opacity: 0; transform: translateY(10px); }
+                    to { opacity: 1; transform: translateY(0); }
+                }
+                @keyframes pulse {
+                    0%, 100% { opacity: 1; }
+                    50% { opacity: 0.4; }
+                }
+            `}</style>
         </div>
     );
 };
