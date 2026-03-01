@@ -357,6 +357,7 @@ export const AssistantEngine: React.FC = () => {
             >
                 {/* Webcam preview */}
                 <WebcamPreview
+
                     stream={null}
                     active={camStatus === "on"}
                     emotion={displayState.lastEmotion}
